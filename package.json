@@ -5,6 +5,7 @@
   "description": "Minimal GitHub Pages dashboard fed by Google Sheets via Actions",
   "license": "MIT",
   "dependencies": {
-    "google-spreadsheet": "^4.1.2"
+    "google-spreadsheet": "4.1.2",
+    "google-auth-library": "^9.14.2"
   }
 }
