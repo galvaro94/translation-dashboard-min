@@ -1,38 +1,18 @@
-name: Update & Deploy Dashboard
+name: Update & Deploy Dashboard (debug)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-  schedule:
-    - cron: "0 * * * 1-5" # hourly on weekdays (UTC)
 
 jobs:
-  build-and-deploy:
+  debug:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "18"
-
-      - name: Install deps
-        run: npm install
-
-      - name: Fetch Google Sheets data and build site (via googleapis)
+      - run: npm install googleapis@^131 google-auth-library@^9.14.2
+      - name: Check secrets and try read
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
@@ -40,20 +20,21 @@ jobs:
           node - <<'NODE'
           const { google } = require('googleapis');
           const { JWT } = require('google-auth-library');
-          const fs = require('fs');
 
           (async () => {
             try {
-              const SHEET_ID = process.env.GOOGLE_SHEET_ID;
-              const RAW = process.env.GOOGLE_SERVICE_ACCOUNT;
-              if (!SHEET_ID || !RAW) throw new Error('Missing GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT');
+              const id = process.env.GOOGLE_SHEET_ID || '';
+              const raw = process.env.GOOGLE_SERVICE_ACCOUNT || '';
+              console.log('ID length:', id.length);
+              console.log('ID preview:', id.slice(0,6) + '...' + id.slice(-6));
+              if (!id || !raw) throw new Error('Missing secrets');
 
-              const creds = JSON.parse(RAW);
+              const creds = JSON.parse(raw);
               if (creds.private_key && creds.private_key.includes('\\n')) {
                 creds.private_key = creds.private_key.replace(/\\n/g, '\n');
               }
+              console.log('Service account email:', (creds.client_email || '(none)'));
 
-              // Auth via official Google APIs client
               const auth = new JWT({
                 email: creds.client_email,
                 key: creds.private_key,
@@ -61,171 +42,17 @@ jobs:
               });
               const sheets = google.sheets({ version: 'v4', auth });
 
-              // Read A:G (7 columns) from the first sheet
-              const resp = await sheets.spreadsheets.values.get({
-                spreadsheetId: SHEET_ID,
-                range: 'A:G',
-              });
+              // Try a lightweight metadata call first
+              const meta = await sheets.spreadsheets.get({ spreadsheetId: id });
+              console.log('Spreadsheet title:', meta.data.properties?.title);
 
-              const values = resp.data.values || [];
-              if (values.length === 0) {
-                console.log('No rows found.');
-              }
-
-              // If first row looks like headers, skip it
-              let rows = values;
-              if (rows.length && rows[0].join(' ').toLowerCase().includes('program')) {
-                rows = rows.slice(1);
-              }
-
-              // Map columns by index:
-              // 0: Date Requested | 1: Program | 2: Language | 3: Document Name
-              // 4: Deadline | 5: Status | 6: Link
-              const data = rows.map((r, i) => ({
-                id: i + 1,
-                program: (r[1] || '').trim(),
-                language: (r[2] || '').trim(),
-                title: (r[3] || '').trim(),
-                deadline: (r[4] || '').trim(),
-                status: (r[5] || 'Pending').trim(),
-                link: (r[6] || '').trim(),
-                requested: (r[0] || '').trim(),
-              })).filter(d => d.program && d.title);
-
-              // Build static site output
-              fs.mkdirSync('src', { recursive: true });
-              fs.writeFileSync('src/translations.json', JSON.stringify(data, null, 2));
-
-              const html = `<!doctype html>
-              <html lang="en">
-              <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>Language Services Dashboard</title>
-                <style>
-                  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
-                  .wrap { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
-                  h1 { font-size: 28px; margin: 0 0 8px; }
-                  .muted { color:#94a3b8; }
-                  .cards { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:16px; margin-top:16px; }
-                  .card { background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:12px; padding:16px; }
-                  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid rgba(255,255,255,0.2); }
-                  .status-Completed { background: rgba(34,197,94,0.15); border-color: rgba(34,197,94,0.35); color:#86efac; }
-                  .status-Pending, .status-In\\ Progress { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.35); color:#93c5fd; }
-                  a.btn { display:inline-block; margin-top:10px; padding:8px 10px; border-radius:8px; background:#3b82f6; color:white; text-decoration:none; }
-                  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-                  select { background:rgba(255,255,255,0.06); color:#e2e8f0; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px; }
-                  .kpi { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap:12px; margin:16px 0; }
-                  .kpi > div { background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:12px; padding:14px; }
-                  .kpi h3 { margin:0; font-size:22px; }
-                  .kpi p { margin:4px 0 0; color:#cbd5e1; font-size:13px; }
-                </style>
-              </head>
-              <body>
-                <div class="wrap">
-                  <h1>Language Services Dashboard</h1>
-                  <div class="muted" id="timestamp"></div>
-                  <div class="kpi" id="kpi"></div>
-                  <div class="row" style="margin:12px 0;">
-                    <label>
-                      <span class="muted" style="font-size:13px;">Filter program:</span><br/>
-                      <select id="programFilter"></select>
-                    </label>
-                    <label>
-                      <span class="muted" style="font-size:13px;">Filter status:</span><br/>
-                      <select id="statusFilter">
-                        <option value="all">All</option>
-                        <option>Pending</option>
-                        <option>In Progress</option>
-                        <option>Completed</option>
-                      </select>
-                    </label>
-                  </div>
-                  <div class="cards" id="cards"></div>
-                </div>
-                <script>
-                  async function load() {
-                    const res = await fetch('./translations.json', { cache: 'no-store' });
-                    const data = await res.json();
-                    document.getElementById('timestamp').textContent = 'Last updated: ' + new Date().toLocaleString();
-                    const total = data.length;
-                    const completed = data.filter(d => (d.status||'').toLowerCase() === 'completed').length;
-                    const inprog = data.filter(d => (d.status||'').toLowerCase() === 'in progress').length;
-                    const withLinks = data.filter(d => d.link && d.link.trim() !== '').length;
-                    const overdue = data.filter(d => {
-                      if (!d.deadline) return false;
-                      const dd = new Date(d.deadline);
-                      const now = new Date();
-                      const isCompleted = (d.status||'').toLowerCase() === 'completed';
-                      return dd < now && !isCompleted;
-                    }).length;
-
-                    const kpi = document.getElementById('kpi');
-                    kpi.innerHTML = [
-                      ['Requests', total],
-                      ['Completed', completed],
-                      ['In Progress', inprog],
-                      ['Overdue', overdue],
-                      ['With Links', withLinks]
-                    ].map(([label, val]) => \`<div><h3>\${val}</h3><p>\${label}</p></div>\`).join('');
-
-                    const programs = Array.from(new Set(data.map(d => d.program).filter(Boolean))).sort();
-                    const programSel = document.getElementById('programFilter');
-                    programSel.innerHTML = '<option value="all">All</option>' + programs.map(p => \`<option>\${p}</option>\`).join('');
-                    programSel.addEventListener('change', () => render());
-                    document.getElementById('statusFilter').addEventListener('change', () => render());
-
-                    function render() {
-                      const pVal = programSel.value;
-                      const sVal = document.getElementById('statusFilter').value;
-                      const cards = document.getElementById('cards');
-                      const filtered = data.filter(d =>
-                        (pVal === 'all' || d.program === pVal) &&
-                        (sVal === 'all' || (d.status||'') === sVal)
-                      );
-                      cards.innerHTML = filtered.map(d => {
-                        const statusClass = 'status-' + (d.status||'').replace(' ', '\\ ');
-                        return \`
-                          <div class="card">
-                            <div class="row" style="justify-content:space-between;">
-                              <div style="font-weight:600;">\${d.title || '(Untitled)'}</div>
-                              <span class="badge \${statusClass}">\${d.status || 'Pending'}</span>
-                            </div>
-                            <div class="muted" style="margin:6px 0 10px;">\${d.program || ''} • \${d.language || ''}</div>
-                            <div class="muted" style="font-size:13px;">
-                              Requested: \${d.requested || '—'} • Deadline: \${d.deadline || '—'}
-                            </div>
-                            \${d.link ? \`<a class="btn" href="\${d.link}" target="_blank" rel="noopener">Open Link</a>\` : ''}
-                          </div>\`;
-                      }).join('');
-                    }
-                    render();
-                  }
-                  load().catch(err => {
-                    document.getElementById('cards').innerHTML = '<div class="muted">Error loading data.</div>';
-                    console.error(err);
-                  });
-                </script>
-              </body>
-              </html>`;
-              fs.writeFileSync('src/index.html', html);
-
-              console.log('✅ Built src/index.html and src/translations.json');
+              // Then try values
+              const resp = await sheets.spreadsheets.values.get({ spreadsheetId: id, range: 'A1:G10' });
+              console.log('Sample rows returned:', (resp.data.values || []).length);
+              console.log('✅ Access works.');
             } catch (e) {
-              console.error('❌ Build error:', e?.stack || e);
+              console.error('❌ Debug failure:', e.response?.data || e.message || e);
               process.exit(1);
             }
           })();
           NODE
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload artifact (./src)
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./src
-
-      - name: Deploy
-        id: deploy
-        uses: actions/deploy-pages@v4
