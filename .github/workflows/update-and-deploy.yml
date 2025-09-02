@@ -32,13 +32,13 @@ jobs:
       - name: Install deps
         run: npm install
 
-      - name: Fetch Google Sheets data and build site
+      - name: Fetch Google Sheets data and build site (via googleapis)
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
         run: |
           node - <<'NODE'
-          const { GoogleSpreadsheet } = require('google-spreadsheet');
+          const { google } = require('googleapis');
           const { JWT } = require('google-auth-library');
           const fs = require('fs');
 
@@ -53,50 +53,46 @@ jobs:
                 creds.private_key = creds.private_key.replace(/\\n/g, '\n');
               }
 
-              const doc = new GoogleSpreadsheet(SHEET_ID);
+              // Auth via official Google APIs client
+              const auth = new JWT({
+                email: creds.client_email,
+                key: creds.private_key,
+                scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+              });
+              const sheets = google.sheets({ version: 'v4', auth });
 
-              // Auth that works across versions:
-              if (typeof doc.useServiceAccountAuth === 'function') {
-                // v4 path
-                await doc.useServiceAccountAuth({
-                  client_email: creds.client_email,
-                  private_key: creds.private_key,
-                });
-              } else if (typeof doc.useOAuth2Client === 'function') {
-                // newer path: build a JWT client and pass it in
-                const auth = new JWT({
-                  email: creds.client_email,
-                  key: creds.private_key,
-                  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-                });
-                await auth.authorize();
-                await doc.useOAuth2Client(auth);
-              } else {
-                throw new Error('Unsupported google-spreadsheet auth API in this version.');
+              // Read A:G (7 columns) from the first sheet
+              const resp = await sheets.spreadsheets.values.get({
+                spreadsheetId: SHEET_ID,
+                range: 'A:G',
+              });
+
+              const values = resp.data.values || [];
+              if (values.length === 0) {
+                console.log('No rows found.');
               }
 
-              await doc.loadInfo();
-              const sheet = doc.sheetsByIndex[0];
-              const rows = await sheet.getRows();
+              // If first row looks like headers, skip it
+              let rows = values;
+              if (rows.length && rows[0].join(' ').toLowerCase().includes('program')) {
+                rows = rows.slice(1);
+              }
 
-              // Transform columns:
+              // Map columns by index:
               // 0: Date Requested | 1: Program | 2: Language | 3: Document Name
               // 4: Deadline | 5: Status | 6: Link
-              const data = rows.map((row, i) => {
-                const r = row._rawData || [];
-                return {
-                  id: i + 1,
-                  program: (r[1] || '').toString().trim(),
-                  language: (r[2] || '').toString().trim(),
-                  title: (r[3] || '').toString().trim(),
-                  deadline: (r[4] || '').toString().trim(),
-                  status: (r[5] || 'Pending').toString().trim(),
-                  link: (r[6] || '').toString().trim(),
-                  requested: (r[0] || '').toString().trim(),
-                };
-              }).filter(d => d.program && d.title);
+              const data = rows.map((r, i) => ({
+                id: i + 1,
+                program: (r[1] || '').trim(),
+                language: (r[2] || '').trim(),
+                title: (r[3] || '').trim(),
+                deadline: (r[4] || '').trim(),
+                status: (r[5] || 'Pending').trim(),
+                link: (r[6] || '').trim(),
+                requested: (r[0] || '').trim(),
+              })).filter(d => d.program && d.title);
 
-              // Output for GitHub Pages
+              // Build static site output
               fs.mkdirSync('src', { recursive: true });
               fs.writeFileSync('src/translations.json', JSON.stringify(data, null, 2));
 
@@ -152,7 +148,6 @@ jobs:
                     const res = await fetch('./translations.json', { cache: 'no-store' });
                     const data = await res.json();
                     document.getElementById('timestamp').textContent = 'Last updated: ' + new Date().toLocaleString();
-
                     const total = data.length;
                     const completed = data.filter(d => (d.status||'').toLowerCase() === 'completed').length;
                     const inprog = data.filter(d => (d.status||'').toLowerCase() === 'in progress').length;
