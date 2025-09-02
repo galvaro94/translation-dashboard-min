@@ -39,27 +39,49 @@ jobs:
         run: |
           node - <<'NODE'
           const { GoogleSpreadsheet } = require('google-spreadsheet');
+          const { JWT } = require('google-auth-library');
           const fs = require('fs');
 
           (async () => {
             try {
-              const sheetId = process.env.GOOGLE_SHEET_ID;
-              const credsRaw = process.env.GOOGLE_SERVICE_ACCOUNT;
-              if (!sheetId || !credsRaw) throw new Error('Missing GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT');
+              const SHEET_ID = process.env.GOOGLE_SHEET_ID;
+              const RAW = process.env.GOOGLE_SERVICE_ACCOUNT;
+              if (!SHEET_ID || !RAW) throw new Error('Missing GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT');
 
-              const creds = JSON.parse(credsRaw);
+              const creds = JSON.parse(RAW);
               if (creds.private_key && creds.private_key.includes('\\n')) {
                 creds.private_key = creds.private_key.replace(/\\n/g, '\n');
               }
 
-              // Connect
-              const doc = new GoogleSpreadsheet(sheetId);
-              await doc.useServiceAccountAuth({ client_email: creds.client_email, private_key: creds.private_key });
+              const doc = new GoogleSpreadsheet(SHEET_ID);
+
+              // Auth that works across versions:
+              if (typeof doc.useServiceAccountAuth === 'function') {
+                // v4 path
+                await doc.useServiceAccountAuth({
+                  client_email: creds.client_email,
+                  private_key: creds.private_key,
+                });
+              } else if (typeof doc.useOAuth2Client === 'function') {
+                // newer path: build a JWT client and pass it in
+                const auth = new JWT({
+                  email: creds.client_email,
+                  key: creds.private_key,
+                  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+                });
+                await auth.authorize();
+                await doc.useOAuth2Client(auth);
+              } else {
+                throw new Error('Unsupported google-spreadsheet auth API in this version.');
+              }
+
               await doc.loadInfo();
               const sheet = doc.sheetsByIndex[0];
               const rows = await sheet.getRows();
 
-              // Transform: 0: Date Requested | 1: Program | 2: Language | 3: Document Name | 4: Deadline | 5: Status | 6: Link
+              // Transform columns:
+              // 0: Date Requested | 1: Program | 2: Language | 3: Document Name
+              // 4: Deadline | 5: Status | 6: Link
               const data = rows.map((row, i) => {
                 const r = row._rawData || [];
                 return {
@@ -70,28 +92,22 @@ jobs:
                   deadline: (r[4] || '').toString().trim(),
                   status: (r[5] || 'Pending').toString().trim(),
                   link: (r[6] || '').toString().trim(),
-                  requested: (r[0] || '').toString().trim()
+                  requested: (r[0] || '').toString().trim(),
                 };
               }).filter(d => d.program && d.title);
 
-              // Ensure output folder
-              require('fs').mkdirSync('src', { recursive: true });
-
-              // Write JSON for the page to fetch
+              // Output for GitHub Pages
+              fs.mkdirSync('src', { recursive: true });
               fs.writeFileSync('src/translations.json', JSON.stringify(data, null, 2));
 
-              // Minimal static dashboard (no build tools)
               const html = `<!doctype html>
               <html lang="en">
               <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <title>Language Services Dashboard</title>
-                <link rel="preconnect" href="https://fonts.googleapis.com">
-                <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-                <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
                 <style>
-                  body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
+                  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
                   .wrap { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
                   h1 { font-size: 28px; margin: 0 0 8px; }
                   .muted { color:#94a3b8; }
@@ -113,9 +129,7 @@ jobs:
                 <div class="wrap">
                   <h1>Language Services Dashboard</h1>
                   <div class="muted" id="timestamp"></div>
-
                   <div class="kpi" id="kpi"></div>
-
                   <div class="row" style="margin:12px 0;">
                     <label>
                       <span class="muted" style="font-size:13px;">Filter program:</span><br/>
@@ -131,18 +145,14 @@ jobs:
                       </select>
                     </label>
                   </div>
-
                   <div class="cards" id="cards"></div>
                 </div>
-
                 <script>
                   async function load() {
                     const res = await fetch('./translations.json', { cache: 'no-store' });
                     const data = await res.json();
-
                     document.getElementById('timestamp').textContent = 'Last updated: ' + new Date().toLocaleString();
 
-                    // KPIs
                     const total = data.length;
                     const completed = data.filter(d => (d.status||'').toLowerCase() === 'completed').length;
                     const inprog = data.filter(d => (d.status||'').toLowerCase() === 'in progress').length;
@@ -162,9 +172,7 @@ jobs:
                       ['In Progress', inprog],
                       ['Overdue', overdue],
                       ['With Links', withLinks]
-                    ].map(([label, val]) => 
-                      \`<div><h3>\${val}</h3><p>\${label}</p></div>\`
-                    ).join('');
+                    ].map(([label, val]) => \`<div><h3>\${val}</h3><p>\${label}</p></div>\`).join('');
 
                     const programs = Array.from(new Set(data.map(d => d.program).filter(Boolean))).sort();
                     const programSel = document.getElementById('programFilter');
@@ -176,11 +184,10 @@ jobs:
                       const pVal = programSel.value;
                       const sVal = document.getElementById('statusFilter').value;
                       const cards = document.getElementById('cards');
-                      const filtered = data.filter(d => 
+                      const filtered = data.filter(d =>
                         (pVal === 'all' || d.program === pVal) &&
                         (sVal === 'all' || (d.status||'') === sVal)
                       );
-
                       cards.innerHTML = filtered.map(d => {
                         const statusClass = 'status-' + (d.status||'').replace(' ', '\\ ');
                         return \`
