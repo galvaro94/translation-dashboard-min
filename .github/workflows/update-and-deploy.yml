@@ -5,7 +5,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: "0 * * * 1-5" # hourly on weekdays (UTC). Adjust if you want.
+    - cron: "0 * * * 1-5" # hourly on weekdays (UTC)
 
 jobs:
   build-and-deploy:
@@ -219,4 +219,11 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      - na
+      - name: Upload artifact (./src)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./src
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
