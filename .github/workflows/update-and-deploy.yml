@@ -1,12 +1,12 @@
 name: Update & Deploy Dashboards (Translations + Interpretation)
 
 on:
-  workflow_dispatch:   # run manually from Actions tab
+  workflow_dispatch:          # run manually
   push:
-    branches: [ main ] # also runs when you commit to main
-  # To auto-update every 2 hours later, add:
+    branches: [ main ]        # also runs on commits to main
+  # To auto-update every 2 hours later, uncomment:
   # schedule:
-  #   - cron: "0 */2 * * *"  # UTC
+  #   - cron: "0 */2 * * *"   # UTC
 
 jobs:
   build-and-deploy:
@@ -28,29 +28,29 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: '18'
 
       - name: Install deps
         run: npm install googleapis@^131 google-auth-library@^9.14.2
 
-      - name: Build Translations & Interpretation pages
-        env:
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+      - name: Write build script
         run: |
-          node - <<'NODE'
+          mkdir -p src
+          cat > build.js <<'NODE'
           const { google } = require('googleapis');
           const { JWT } = require('google-auth-library');
           const fs = require('fs');
 
-          const ensureDir = p => fs.mkdirSync(p, { recursive: true });
+          const ensureDir = (p) => { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); };
           const write = (p, s) => fs.writeFileSync(p, s);
-          const exists = p => fs.existsSync(p);
+          const exists = (p) => fs.existsSync(p);
 
           function parseCreds(raw) {
             if (!raw) throw new Error('Missing GOOGLE_SERVICE_ACCOUNT secret.');
             const c = JSON.parse(raw);
-            if (c.private_key && c.private_key.includes('\\n')) c.private_key = c.private_key.replace(/\\n/g, '\n');
+            if (c.private_key && c.private_key.includes('\\n')) {
+              c.private_key = c.private_key.replace(/\\n/g, '\n');
+            }
             return c;
           }
 
@@ -73,7 +73,7 @@ jobs:
 
             ensureDir('src');
 
-            // ===== TRANSLATIONS ===== (Translations!A:G)
+            // ===== TRANSLATIONS (Translations!A:G)
             let t = await getRows(auth, SHEET_ID, 'Translations!A:G');
             if (t.length && t[0].join(' ').toLowerCase().includes('document')) t = t.slice(1);
 
@@ -90,9 +90,10 @@ jobs:
 
             write('src/translations.json', JSON.stringify(translations, null, 2));
 
-            // Create a simple translations UI if none exists yet
+            // Only create a minimal index.html if none exists (won't overwrite your working page)
             if (!exists('src/index.html')) {
-              write('src/index.html', `<!doctype html><meta charset="utf-8"><title>Translations</title>
+              write('src/index.html', `
+<!doctype html><meta charset="utf-8"><title>Translations</title>
 <body style="font-family:system-ui;background:#0f172a;color:#e2e8f0;margin:0">
   <div style="max-width:1100px;margin:32px auto;padding:0 16px">
     <div><a href="./interpretation.html" style="color:#93c5fd;text-decoration:none">Go to Interpretation »</a></div>
@@ -132,7 +133,7 @@ jobs:
 </script></body>`);
             }
 
-            // ===== INTERPRETATION ===== (Interpretation!A:G)
+            // ===== INTERPRETATION (Interpretation!A:G)
             let i = await getRows(auth, SHEET_ID, 'Interpretation!A:G');
             if (i.length && i[0].join(' ').toLowerCase().includes('event')) i = i.slice(1);
 
@@ -150,7 +151,8 @@ jobs:
             write('src/interpretation.json', JSON.stringify(interp, null, 2));
 
             if (!exists('src/interpretation.html')) {
-              write('src/interpretation.html', `<!doctype html><meta charset="utf-8"><title>Interpretation</title>
+              write('src/interpretation.html', `
+<!doctype html><meta charset="utf-8"><title>Interpretation</title>
 <body style="font-family:system-ui;background:#0f172a;color:#e2e8f0;margin:0">
   <div style="max-width:1100px;margin:32px auto;padding:0 16px">
     <div><a href="./index.html" style="color:#93c5fd;text-decoration:none">« Back to Translations</a></div>
@@ -197,8 +199,8 @@ jobs:
 </script></body>`);
             }
 
-            console.log('✅ Built pages and data.');
-          })().catch(e => { console.error('❌ Build error:', e?.response?.data || e?.stack || e); process.exit(1); });
+            console.log('Built pages and data OK');
+          })().catch(e => { console.error('Build error:', e?.response?.data || e?.stack || e); process.exit(1); });
           NODE
 
       - name: List built files
